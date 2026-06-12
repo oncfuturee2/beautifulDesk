@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "BeautifulDesk 整理",
+  "productName": "BeautifulDesk",
   "version": "0.1.0",
   "identifier": "com.edy.beautifuldesk",
   "build": {
@@ -12,6 +12,7 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "整理",
         "width": 920,
         "height": 640,

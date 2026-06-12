@@ -1,4 +1,3 @@
-import { invoke } from "@tauri-apps/api/core";
 import {
   useCallback,
   useEffect,
@@ -7,48 +6,19 @@ import {
   useState,
   type CSSProperties,
 } from "react";
+import {
+  callBackend,
+  type DesktopActionResult,
+  type DesktopSessionInfo,
+  type WallpaperMetrics,
+} from "./backend";
+import WallpaperWindow from "./WallpaperWindow";
+import WebGLWaterSurface from "./WebGLWaterSurface";
 import "./App.css";
 
 type Phase = "booting" | "ready" | "breaking" | "hidden" | "restoring" | "error";
 
-type RecoveryReport = {
-  restored_count: number;
-  message: string;
-};
-
-type DesktopSessionInfo = {
-  snapshot_path: string;
-  icon_count: number;
-  snap_to_grid: boolean;
-  auto_arrange: boolean;
-  hidden: boolean;
-  startup_recovery?: RecoveryReport | null;
-  warning?: string | null;
-};
-
-type DesktopActionResult = {
-  snapshot_path: string;
-  icon_count: number;
-  moved_count: number;
-  snap_to_grid_was_on: boolean;
-  auto_arrange_was_on: boolean;
-  hidden: boolean;
-  message: string;
-};
-
-type Ripple = {
-  id: number;
-  x: number;
-  y: number;
-};
-
 type CssVars = CSSProperties & Record<`--${string}`, string>;
-
-declare global {
-  interface Window {
-    __TAURI_INTERNALS__?: unknown;
-  }
-}
 
 const BUTTON_COLS = 12;
 const BUTTON_ROWS = 6;
@@ -62,63 +32,28 @@ function asErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
-async function callBackend<T>(command: string): Promise<T> {
-  if (window.__TAURI_INTERNALS__) {
-    return invoke<T>(command);
-  }
-
-  await new Promise((resolve) => window.setTimeout(resolve, 220));
-
-  if (command === "hide_desktop_icons") {
-    return {
-      snapshot_path: "Tauri 运行时内有效",
-      icon_count: 18,
-      moved_count: 18,
-      snap_to_grid_was_on: true,
-      auto_arrange_was_on: false,
-      hidden: true,
-      message: "Preview mode",
-    } as T;
-  }
-
-  if (command === "restore_desktop_icons") {
-    return {
-      snapshot_path: "Tauri 运行时内有效",
-      icon_count: 18,
-      moved_count: 18,
-      snap_to_grid_was_on: true,
-      auto_arrange_was_on: false,
-      hidden: false,
-      message: "Preview mode",
-    } as T;
-  }
-
-  return {
-    snapshot_path: "Tauri 运行时内有效",
-    icon_count: 18,
-    snap_to_grid: true,
-    auto_arrange: false,
-    hidden: false,
-    startup_recovery: null,
-    warning: null,
-  } as T;
-}
-
-function App() {
+function OrganizeApp() {
   const [phase, setPhase] = useState<Phase>("booting");
   const [status, setStatus] = useState<DesktopSessionInfo | null>(null);
+  const [wallpaper, setWallpaper] = useState<WallpaperMetrics | null>(null);
+  const [wallpaperBusy, setWallpaperBusy] = useState(false);
+  const [waterReady, setWaterReady] = useState(false);
   const [message, setMessage] = useState("正在记录桌面快照");
-  const [ripples, setRipples] = useState<Ripple[]>([]);
-  const [cursorStyle, setCursorStyle] = useState<CssVars>({
-    "--cursor-x": "50%",
-    "--cursor-y": "50%",
-  });
-  const rippleId = useRef(0);
-  const lastRippleAt = useRef(0);
+  const stageRef = useRef<HTMLElement | null>(null);
   const breakTimer = useRef<number | null>(null);
 
+  const refreshWallpaperStatus = useCallback(async () => {
+    const nextWallpaper = await callBackend<WallpaperMetrics>("wallpaper_status");
+    setWallpaper(nextWallpaper);
+    return nextWallpaper;
+  }, []);
+
   const loadStatus = useCallback(async () => {
-    const info = await callBackend<DesktopSessionInfo>("desktop_status");
+    const [info] = await Promise.all([
+      callBackend<DesktopSessionInfo>("desktop_status"),
+      refreshWallpaperStatus().catch(() => null),
+    ]);
+
     setStatus(info);
 
     if (info.hidden) {
@@ -136,33 +71,16 @@ function App() {
     } else {
       setMessage(`快照已记录：${info.icon_count} 个桌面图标`);
     }
-  }, []);
+  }, [refreshWallpaperStatus]);
 
   useEffect(() => {
     let mounted = true;
 
-    callBackend<DesktopSessionInfo>("desktop_status")
-      .then((info) => {
-        if (!mounted) return;
-        setStatus(info);
-
-        if (info.hidden) {
-          setPhase("hidden");
-          setMessage("检测到仍需复原的桌面记录");
-        } else {
-          setPhase("ready");
-          setMessage(
-            info.startup_recovery
-              ? `已恢复上次中断的布局：${info.startup_recovery.restored_count} 个图标`
-              : `快照已记录：${info.icon_count} 个桌面图标`,
-          );
-        }
-      })
-      .catch((error) => {
-        if (!mounted) return;
-        setPhase("error");
-        setMessage(asErrorMessage(error));
-      });
+    loadStatus().catch((error) => {
+      if (!mounted) return;
+      setPhase("error");
+      setMessage(asErrorMessage(error));
+    });
 
     return () => {
       mounted = false;
@@ -170,39 +88,20 @@ function App() {
         window.clearTimeout(breakTimer.current);
       }
     };
-  }, []);
+  }, [loadStatus]);
 
   const statusItems = useMemo(() => {
     if (!status) {
-      return ["快照 读取中", "网格对齐 检查中", "自动排列 检查中"];
+      return ["快照 读取中", "网格对齐 检查中", "自动排列 检查中", "壁纸窗口 检查中"];
     }
 
     return [
       `快照 ${status.icon_count} 个`,
       `网格对齐 ${status.snap_to_grid ? "开启" : "关闭"}`,
       `自动排列 ${status.auto_arrange ? "开启" : "关闭"}`,
+      `壁纸窗口 ${wallpaper?.active ? "开启" : "未开启"}`,
     ];
-  }, [status]);
-
-  const handlePointerMove = (event: React.PointerEvent<HTMLElement>) => {
-    setCursorStyle({
-      "--cursor-x": `${event.clientX}px`,
-      "--cursor-y": `${event.clientY}px`,
-    });
-
-    const now = window.performance.now();
-    if (now - lastRippleAt.current < 95) {
-      return;
-    }
-
-    lastRippleAt.current = now;
-    const id = rippleId.current + 1;
-    rippleId.current = id;
-    setRipples((current) => [...current.slice(-8), { id, x: event.clientX, y: event.clientY }]);
-    window.setTimeout(() => {
-      setRipples((current) => current.filter((ripple) => ripple.id !== id));
-    }, 1250);
-  };
+  }, [status, wallpaper?.active]);
 
   const handleOrganize = async () => {
     if (phase === "breaking" || phase === "hidden" || phase === "restoring") {
@@ -244,40 +143,38 @@ function App() {
     }
   };
 
+  const handleWallpaper = async () => {
+    if (wallpaperBusy) {
+      return;
+    }
+
+    setWallpaperBusy(true);
+
+    try {
+      const nextWallpaper = await callBackend<WallpaperMetrics>("ensure_wallpaper_window");
+      setWallpaper(nextWallpaper);
+      setMessage("壁纸窗口已开启");
+    } catch (error) {
+      setPhase("error");
+      setMessage(asErrorMessage(error));
+    } finally {
+      setWallpaperBusy(false);
+    }
+  };
+
   const showMainButton = phase === "ready" || phase === "breaking" || phase === "error";
   const canRestore = phase === "hidden" || status?.hidden;
+  const captureKey = `${phase}:${message}:${status?.icon_count ?? 0}:${wallpaper?.active ?? false}`;
 
   return (
-    <main className="app-shell" style={cursorStyle} onPointerMove={handlePointerMove}>
-      <svg className="filter-defs" aria-hidden="true" focusable="false">
-        <filter id="water-distortion">
-          <feTurbulence
-            type="fractalNoise"
-            baseFrequency="0.012 0.026"
-            numOctaves="2"
-            seed="11"
-            result="noise"
-          >
-            <animate
-              attributeName="baseFrequency"
-              dur="7s"
-              values="0.012 0.026; 0.018 0.018; 0.010 0.032; 0.012 0.026"
-              repeatCount="indefinite"
-            />
-          </feTurbulence>
-          <feDisplacementMap in="SourceGraphic" in2="noise" scale="7" xChannelSelector="R" yChannelSelector="G" />
-        </filter>
-      </svg>
+    <main className={`app-shell ${waterReady ? "is-water-ready" : ""}`}>
+      <WebGLWaterSurface
+        targetRef={stageRef}
+        captureKey={captureKey}
+        onReady={setWaterReady}
+      />
 
-      {ripples.map((ripple) => (
-        <span
-          className="cursor-ripple"
-          key={ripple.id}
-          style={{ "--x": `${ripple.x}px`, "--y": `${ripple.y}px` } as CssVars}
-        />
-      ))}
-
-      <section className="stage">
+      <section className="stage" ref={stageRef}>
         <header className="topbar">
           <div className="brand-block">
             <span className="app-mark" aria-hidden="true" />
@@ -293,14 +190,24 @@ function App() {
             ))}
           </div>
 
-          <button
-            className="restore-command"
-            type="button"
-            onClick={handleRestore}
-            disabled={!canRestore || phase === "restoring"}
-          >
-            复原
-          </button>
+          <div className="command-group">
+            <button
+              className="wallpaper-command"
+              type="button"
+              onClick={handleWallpaper}
+              disabled={wallpaperBusy || wallpaper?.active}
+            >
+              壁纸窗口
+            </button>
+            <button
+              className="restore-command"
+              type="button"
+              onClick={handleRestore}
+              disabled={!canRestore || phase === "restoring"}
+            >
+              复原
+            </button>
+          </div>
         </header>
 
         <section className="center-zone" aria-live="polite">
@@ -351,6 +258,16 @@ function App() {
       </section>
     </main>
   );
+}
+
+function App() {
+  const view = new URLSearchParams(window.location.search).get("view");
+
+  if (view === "wallpaper") {
+    return <WallpaperWindow />;
+  }
+
+  return <OrganizeApp />;
 }
 
 export default App;
